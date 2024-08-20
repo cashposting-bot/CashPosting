@@ -1,0 +1,92 @@
+USE [CashPosting]
+GO
+/****** Object:  StoredProcedure [dbo].[AssignAssociatesToLogEntries_EFT]    Script Date: 8/19/2024 3:02:46 PM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+ALTER PROCEDURE [dbo].[AssignAssociatesToLogEntries_EFT]
+AS
+BEGIN
+	--SET NOCOUNT ON
+	DECLARE @Facilities TABLE (RowID INT not null PRIMARY KEY IDENTITY(1,1), id INT) 
+	CREATE TABLE  #Associates (AssociateRowID INT not null PRIMARY KEY IDENTITY(1,1),useremailid NVARCHAR(50), facilityid INT)
+	CREATE TABLE  #LogEntries (LogRowId INT not null PRIMARY KEY IDENTITY(1,1), CashPostingLogId BIGINT)
+	DECLARE @FacilitiesRowsToProcess INT
+	DECLARE @LogsRowsToProcess INT
+	DECLARE @CurrentRow INT = 0
+	DECLARE @CurrentRow1 INT = 0
+	DECLARE @FacilityId INT
+	   
+	INSERT INTO @Facilities (id) SELECT FacilityID FROM FacilityData WHERE IsAutomated = 1 
+	SET @FacilitiesRowsToProcess = @@ROWCOUNT
+	-- pick each facility one by one
+	WHILE @CurrentRow < @FacilitiesRowsToProcess
+	BEGIN
+	    
+	    TRUNCATE TABLE #Associates
+		TRUNCATE TABLE #LogEntries
+
+		SET @CurrentRow = @CurrentRow + 1
+		SELECT @FacilityId=id FROM @Facilities WHERE RowID=@CurrentRow
+		
+		--get all the associates for the current selected facility
+		INSERT INTO #Associates (useremailid, facilityid) 
+		SELECT UserEmailId, FacilityId FROM UserDetails WHERE FacilityId=@FacilityId AND IsActive  = 1 AND PaymentType IS NOT NULL ORDER By Priority ASC
+		
+		-- get all the log entries to assign associates
+		INSERT INTO #LogEntries (CashPostingLogId)
+		SELECT CashPostingLogId FROM CashPostingLog Where FacilityId = @FacilityId AND IsNew = 1 and Assignedto Is Null AND PaymentType = 'EFT' 
+		ORDER BY DepositAmount DESC
+
+		SET @LogsRowsToProcess = (SELECT COUNT(*) FROM #LogEntries)
+		PRINT 'Cash Posting log row to process '
+		PRINT @LogsRowsToProcess
+
+		DECLARE @logid INT = 0
+		DECLARE @assignedto NVARCHAR(50)
+		DECLARE @Associatecount INT = (SELECT COUNT(*) FROM #Associates)
+		DECLARE @Associaterowcount int = 0;
+		PRINT 'Associate total count ' 
+		PRINT @Associatecount
+		IF (@Associatecount > 1)
+			BEGIN 
+				WHILE @CurrentRow1 < @LogsRowsToProcess
+					BEGIN
+						IF(@AssociateRowCount >= @AssociateCount)
+							BEGIN 
+									SET @Associaterowcount = 1
+							END
+						SET @CurrentRow1 = @CurrentRow1 + 1
+						SET @Associaterowcount = @Associaterowcount + 1
+						print 'Associate Row count ' 
+						Print @Associaterowcount
+						SET @logid = (SELECT CashPostingLogid FROM #LogEntries WHERE LogRowId = @CurrentRow1)
+						SET @assignedto = (SELECT UserEmailId FROM #Associates WHERE AssociateRowID = @Associaterowcount)
+			
+						print 'logid'
+						print @logid
+
+						print 'Assigned to'
+						print @assignedto
+						UPDATE CashPostingLog SET AssignedTo = @assignedto WHERE CashPostingLogId = @logid
+						PRINT @logid
+						PRINT @assignedto
+						-- Delete Associate with Priority 1 from the table so that they cannot be assigned any new entries
+						IF(@CurrentRow1 = 1)
+							BEGIN
+								DELETE FROM #Associates WHERE useremailid = @assignedto
+							END
+						END		 
+			END
+		ELSE -- Assign all the entries to single person if a facility has only one associate with them
+			BEGIN 
+				SET @assignedto = (SELECT UserEmailId FROM #Associates WHERE AssociateRowID = 1)
+				UPDATE CashPostingLog SET Assignedto = @assignedto WHERE CashPostingLogId IN (SELECT CashPostingLogId FROM #LogEntries)
+			END
+	END
+	 
+	    DROP TABLE #LogEntries
+		DROP TABLE #Associates
+		Print 'Temp tables deleted - logEntries, Associates'
+END
