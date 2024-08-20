@@ -1,0 +1,188 @@
+USE [CashPosting]
+GO
+/****** Object:  StoredProcedure [dbo].[AssignAssociatesToLogEntries_LBX]    Script Date: 8/19/2024 3:08:03 PM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+ALTER PROCEDURE [dbo].[AssignAssociatesToLogEntries_LBX]
+AS
+BEGIN
+	--SET NOCOUNT ON
+	CREATE TABLE #Facilities (RowID INT NOT NULL PRIMARY KEY IDENTITY(1,1), id INT) 
+	CREATE TABLE  #LogEntries (LogRowId INT NOT NULL PRIMARY KEY IDENTITY(1,1), CashPostingLogId BIGINT, LBXBatch INT)
+	CREATE TABLE  #Batches (BatchRowId INT not null PRIMARY KEY IDENTITY(1,1), BatchId INT)
+	CREATE TABLE #Associates  (AssociateRowID INT NOT NULL PRIMARY KEY IDENTITY(1,1),useremailid NVARCHAR(50), facilityid INT)
+
+
+	--DECLARE @LogEntries TABLE (LogRowId INT NOT NULL PRIMARY KEY IDENTITY(1,1), CashPostingLogId BIGINT, LBXBatch INT)
+	
+	--DECLARE @Batches TABLE (BatchRowId INT not null PRIMARY KEY IDENTITY(1,1), BatchId INT)
+	DECLARE @FacilitiesRowsToProcess INT
+	--DECLARE @LogsRowsToProcess INT
+	--DECLARE @BatchesToProcess INT
+	DECLARE @CurrentRow INT = 0
+	DECLARE @CurrentRow1 INT = 0
+	DECLARE @FacilityId INT
+	   
+	INSERT INTO #Facilities (id) SELECT FacilityID FROM FacilityData WHERE IsAutomated = 1 
+	SET @FacilitiesRowsToProcess = @@ROWCOUNT
+	print 'facility rows to process'
+	print @FacilitiesRowsToProcess
+	
+	
+
+	WHILE @CurrentRow < @FacilitiesRowsToProcess
+	BEGIN
+	   
+	  
+		SET @CurrentRow = @CurrentRow + 1
+		SELECT @FacilityId=id FROM #Facilities WHERE RowID=@CurrentRow
+		
+		print 'facility id'
+		print @facilityid
+
+		 TRUNCATE TABLE #LogEntries
+		print ' log entries deleted'
+
+		TRUNCATE TABLE #Batches
+		print 'batch deleted'
+
+		TRUNCATE TABLE #Associates
+		print 'associates deleted'
+
+			DECLARE @LogsRowsToProcess INT
+		INSERT INTO #LogEntries (CashPostingLogId, LBXBatch)
+		SELECT CashPostingLogId, LBXBatch FROM CashPostingLog Where FacilityId = @FacilityId  AND IsNew = 1 and Assignedto Is Null AND PaymentType = 'LBX' ORDER BY DepositAmount DESC
+		SET @LogsRowsToProcess = (select count(*) from #logentries)
+		PRINT 'Cash Posting log row to process '
+		PRINT @LogsRowsToProcess
+
+		DECLARE @BatchesToProcess INT
+		INSERT INTO #Batches (BatchId) 
+		SELECT DISTINCT LBXBatch FROM #LogEntries GROUP BY LBXBatch having lbxbatch is not null
+		SET @BatchesToProcess = (select count(*) from #Batches)
+		PRINT 'Batches to process '
+		PRINT @BatchesToProcess
+		
+		INSERT INTO #Associates (useremailid, facilityid) 
+		SELECT UserEmailId, FacilityId FROM UserDetails WHERE FacilityId=@FacilityId AND IsActive  = 1 AND PaymentType = 'EFT/LBX' ORDER By Priority ASC
+		
+		DECLARE @logid INT = 0
+		DECLARE @assignedto NVARCHAR(50)
+		DECLARE @Batch INT
+		DECLARE @Associatecount INT = (SELECT COUNT(*) FROM #Associates)
+		DECLARE @Associaterowcount int = 0;
+		PRINT 'Associate total count ' 
+		PRINT @Associatecount
+		IF (@LogsRowsToProcess > 0)
+		BEGIN
+		IF (@Associatecount <= 2 AND @BatchesToProcess <=0 ) -- if facility has a single associate
+			BEGIN
+			   print 'associate count is 2 and there is no batch'
+				SET @assignedto = (SELECT UserEmailId FROM #Associates WHERE AssociateRowID = 1)
+				print 'Assigned to'
+				print @assignedto
+				
+				IF(@AssociateCount = 1)
+					BEGIN
+						UPDATE CashPostingLog SET Assignedto = @assignedto WHERE CashPostingLogId IN (SELECT CashPostingLogId FROM #LogEntries)		
+					END
+				ELSE IF(@Associatecount = 2)
+					BEGIN
+						-- assign first highest deposit amount entry to first associate with highest priority.
+						UPDATE CashPostingLog SET Assignedto = @assignedto WHERE CashPostingLogId IN (SELECT CashPostingLogId FROM #LogEntries where LogRowId=1)
+				
+						-- assign remaining all entries to associate with second highest priority
+						SET @assignedto = (SELECT UserEmailId FROM #Associates WHERE AssociateRowID = 2)
+						UPDATE CashPostingLog SET Assignedto = @assignedto WHERE CashPostingLogId IN (SELECT CashPostingLogId FROM #LogEntries where LogRowId <> 1)
+				END
+				ELSE
+					BEGIN
+						Print 'There is no associate Assigned to this facility'
+					END
+			END
+			ELSE 
+			BEGIN 	
+				print 'there is a batch'
+				-- Assign highest deposit amount to associate with priority 1 and remaining log entries from the same batch to associate with priority 2
+				SET @Associaterowcount = @Associaterowcount + 1
+				SET @CurrentRow1 = @CurrentRow1 + 1
+				SELECT @logId = CashPostingLogid, @batch = LBXBatch FROM #LogEntries WHERE LogRowId = @CurrentRow1
+				SELECT @assignedto =UserEmailId FROM #Associates WHERE AssociateRowID = @Associaterowcount	
+
+				
+				--Assign first highest deposit to Associate with Priority 1
+				UPDATE CashPostingLog SET Assignedto = @assignedto WHERE CashPostingLogId = @logId
+
+				print 'log id 1'
+				print @logid
+
+				print 'assigned to 1'
+				print @assignedto
+
+				SET @AssociateRowCount = @Associaterowcount	+ 1
+				-- find associate with second highest priority
+				SELECT @assignedto =UserEmailId FROM #Associates WHERE AssociateRowID = @Associaterowcount
+
+				-- --Assign Remaining log entries from the same to associate with next highest priority
+				UPDATE CashPostingLog SET Assignedto = @assignedto WHERE CashPostingLogId IN ( SELECT CashPostingLogID FROM #LogEntries WHERE LBXBatch = @batch and cashpostinglogid != @logid)
+				
+				print 'assigned to 2'
+				print @assignedto
+
+				--SET @AssociateRowCount = @Associaterowcount	+ 1
+				
+				 -- delete the log entries for a batch which is already updated with associates
+				    DELETE FROM #LogEntries WHERE LBXBatch = @Batch
+					DELETE FROM #Batches WHERE BatchId = @Batch
+
+					DECLARE @NewBatches TABLE (BatchRowId INT not null PRIMARY KEY IDENTITY(1,1), BatchId INT)
+					Insert into @NewBatches(BatchId)select batchid from #Batches
+
+				-- Assign remaining associates to batches equally
+				WHILE @CurrentRow1 <= @BatchesToProcess - 1 -- its batchtoprocess -1 as 1 batch we have already assigned
+					BEGIN
+						print ' remaining entries'
+						--SET @CurrentRow1 = @CurrentRow1 + 1
+						SET @Associaterowcount = @Associaterowcount + 1
+						--SET @CurrentRow1 = @CurrentRow1 + 1
+						print 'associate row count'
+						print @AssociaterowCount
+
+						print 'associate count'
+						print @Associatecount
+
+
+						IF(@AssociateRowCount > @AssociateCount)
+							BEGIN
+								SET @AssociateRowCount = 2
+							END
+
+							print 'current row 1'
+							print @currentRow1
+
+						SELECT @assignedto =UserEmailId FROM #Associates WHERE AssociateRowID = @Associaterowcount
+						SELECT @batch = BatchId FROM @NewBatches WHERE BatchRowId = @CurrentRow1
+
+						print 'batch id'
+						print @batch
+
+						print 'assigned to'
+						print @assignedto
+
+						UPDATE CashPostingLog SET Assignedto = @assignedto WHERE CashPostingLogId IN ( SELECT CashPostingLogID FROM #LogEntries WHERE LBXBatch = @batch)	
+						
+						SET @CurrentRow1 = @CurrentRow1 + 1
+					END					
+				END
+		END		
+		END
+       
+	    DROP TABLE #Facilities
+	    DROP TABLE #LogEntries
+		DROP TABLE #Batches		
+		DROP TABLE #Associates
+		Print 'Temp tables deleted - Facilities, logEntries, Batches, Associates'
+END
